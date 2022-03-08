@@ -1,0 +1,2 @@
+file filter=lfs diff=lfs merge=lfs -text
+3D[[:space:]]RPG filter=lfs diff=lfs merge=lfs -text
