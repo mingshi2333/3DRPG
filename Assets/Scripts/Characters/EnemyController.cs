@@ -2,202 +2,1366 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
-public enum EnemyStates {GUARD,PATROL,CHASE,DEAD}
+
+//ĞÂÔöÌÓÀë×´Ì¬£º±»¹¥»÷²ĞÑªÊ±(ÑªÁ¿±ÈÍæ¼ÒÉÙ)£¬ÓĞ¼¸ÂÊÌÓÀë
+//ĞÂÔöÈÆºó×´Ì¬£ºÃ¿´Î¹¥»÷ºó£¬ÓĞ¼¸ÂÊÇ°Íù³¬¹ıÍæ¼ÒµÄÎ»ÖÃ£¬ÆÚ¼äÒÆ¶¯ËÙ¶È·­±¶
+
+public enum EnemyBehaviorState { GUARD, PATROL, CHASE, DEAD, ESCAPE, CROSS_PLAYER_POS }
 [RequireComponent(typeof(NavMeshAgent))]
-public class EnemyController : MonoBehaviour
+[RequireComponent(typeof(CharacterStats))]
+public class EnemyController : MonoBehaviour,IGameObserver
 {
-    // Start is called before the first frame update
-    private EnemyStates enemyStates;
-    private NavMeshAgent agent;
-    private Animator anim;
+    [HideInInspector]public EnemyBehaviorState enemyBehaviorState;
+    [HideInInspector]public NavMeshAgent agent;
+    protected Animator animator;
+    private Collider coll;
+    protected Rigidbody rigidBody;
+
+    [HideInInspector]public CharacterStats characterStats;
+
     [Header("Basic Settings")]
-    public float sightRadius;
+    public string enemyName;
+    public bool isNightmare;
+    public float sightRadius = 6f;
+    [Range(20, 80)] public int halfSightAngle = 45;
+    public GameObject eyeBall;
     public bool isGuard;
-    private float speed;
-    public float lookAtTime;
-    private float remainLookAtTime;
+    [HideInInspector]public float agentSpeed; 
+    public float lossTargetTime = 1.5f;
+
+    private bool findAttacker;
     private GameObject attackTarget;
-    private CharacterStats characterStats;
-    private float lastAttackTime;
+    private bool noFirstLostTarget;
+    public float lookAtMinTime = 1.5f;
+    public float guardKeepMinTime = 4f;
+    [Tooltip("¹ÖÎïÆ½»¬¿´ÏòÍæ¼ÒµÄËÙ¶È±ÈÂÊ£¬Ä¬ÈÏÎª1")]
+    public float lerpRotationRate = 1;
+    private float remainLookAtTime;
+    protected float lastAttackTime;
+    [HideInInspector]public bool slowAttackRefresh;
+    protected float lastSkillTime;
+    [Tooltip("ÊÇ·ñÎªÎÚ¹ê£¬ËÀÍöºó±äÎª¿É»÷·É¶ÔÏó£¬±£ÁôÔÚ³¡¾°ÖĞÒ»¶ÎÊ±¼ä")]
+    public bool isTurtleShell;
+    public float turtleShellTorqueRate = 5.55f;
+
     [Header("Patrol State")]
+    public float patrolRange = 4f;
+    [Tooltip("¹ÖÎï²ĞÑªÊ±ÌÓÅÜµÄ×î´óËÙ¶È")]
+    public float escapeSpeed;
+    [HideInInspector] public float remainChaingTime = 60f;
+    [Header("SoundDetail")]
+    public SoundDetailList_SO soundDetailList;
+    public float maxNoiseTime = 300f;
+
+    protected float stopDistance;
     private Vector3 wayPoint;
-    private Vector3 guardPos;
-    public float patrolRange;
-    //boolé…åˆåŠ¨ç”»
+    [HideInInspector]public Vector3 guardPos;
+    [HideInInspector]public Quaternion guardRotation;
+    private Quaternion lookAtRotation;
+    private bool noFirstRandomLookAt;
+
+    private float lastPatrolTime; //·ÀÖ¹Patrolµ½´ï²»ÁËÄ¿±ê£¬´Ó¶ø¶øÒ»Ö±¿¨Ç½µÄÇé¿ö
+
+    bool isFoundPlayer;
     bool isWalk;
     bool isChase;
-    bool isFollow;
-    void Awake()
+    protected bool isFollow;
+    [HideInInspector]public bool isDead;
+    bool playerDead;
+    [HideInInspector]public bool isTurtleShellDestroying;
+    private float TurtleDestroyWaitTime = 20f;
+
+    [HideInInspector] public bool isInsightedByPlayer;
+    [HideInInspector] public bool isTargetByPlayer;
+
+    float idleBlend;
+    private bool isLosingInsight; //ÕıÔÚ¶ªÊ§Í¸ÊÓ£¨Ğ­³Ì£©
+
+    [HideInInspector] public int numInArray;
+    [HideInInspector] public bool isSpawning;
+    [HideInInspector] public bool isDestroying;
+
+    private float agentRadius;
+
+    private int stateFrames = 15;
+    [HideInInspector] internal float lastStateFrames;
+    protected float lerpLookAtTime;
+
+    [HideInInspector] public List<GameObject> attachObjects;
+
+    SoundName[] noises = { SoundName.Enemy_Noise1, SoundName.Enemy_Noise2, SoundName.Enemy_Noise3 };
+    float noisePitchBias;
+    float lastNoiseTime;
+    float currentNoiseTime;
+
+    float NextNoiseTime { get { return Random.Range(0, maxNoiseTime); } }
+
+    Vector3 escapeDirection;
+    float escapeDirChangeRate;
+    [HideInInspector]public float remainEscapeTime;
+    bool isEscaping;
+
+    bool isCrossingPlayerPos;
+    NavMeshHit navMeshHit;
+
+    RaycastHit upHighDownHit;
+    private Collider[] playerCols;
+
+    public GameObject AttackTarget
     {
-        agent = GetComponent<NavMeshAgent>();  
-        speed = agent.speed;
-        anim=GetComponent<Animator>();
-        guardPos= transform.position;
-        remainLookAtTime=lookAtTime;
-        characterStats=GetComponent<CharacterStats>();
+        get { return attackTarget; }
+        set { attackTarget = value; findAttacker = true; }
     }
-    void Start()
+
+    protected virtual void Awake()
+    {
+        agent = GetComponent<NavMeshAgent>();
+        animator = GetComponent<Animator>();
+        characterStats = GetComponent<CharacterStats>();
+        coll = GetComponent<Collider>();
+        if (coll == null) coll = GetComponentInChildren<Collider>();
+        rigidBody = GetComponent<Rigidbody>();
+
+        agentSpeed = agent.speed;
+        guardPos = transform.position;
+        guardRotation = transform.rotation;
+        lookAtRotation = guardRotation;
+        remainLookAtTime = lookAtMinTime;
+        stopDistance = agent.stoppingDistance;
+        agentRadius = agent.radius;
+
+        //°Ñ¹ÖÎïAI´í¿ª£¬²»ÔÚÍ¬Ò»Ö¡ÔËĞĞ
+        lastStateFrames = Random.Range(0, stateFrames);
+
+        //¹ÖÎï½ĞÉùÇø·Ö
+        noisePitchBias = Random.Range(-0.2f, 0.2f);
+        lastNoiseTime = NextNoiseTime;
+
+        escapeSpeed = Mathf.Max(escapeSpeed, agentSpeed * 1.3f);
+    }
+
+    protected virtual void Start()
     {
         if(isGuard)
         {
-            enemyStates = EnemyStates.GUARD;
+            enemyBehaviorState = EnemyBehaviorState.GUARD;
         }
         else
         {
-            enemyStates = EnemyStates.PATROL;
-            GetNewWayPoint();
+            enemyBehaviorState = EnemyBehaviorState.PATROL;
+            GetPatrolWayPoint();
         }
     }
 
-    void Update()
+    //ÇĞ»»³¡¾°Ê±ÆôÓÃ
+    private void OnEnable()
+    { 
+        //ÎªÊ²Ã´¹ÖÎïÃ»ÓĞ¶©ÔÄ³É¹¦£¿ÒòÎª¹ÖÎï±¾À´¾Í´æÔÚ£¬OnEnable±Èµ¥ÀıµÄAwakeÏÈÖ´ĞĞ
+        //ĞŞ¸Ä·½Ê½£º¿ÉÒÔÍ¨¹ıĞŞ¸ÄÄ¬ÈÏµÄ´úÂëÖ´ĞĞË³ĞòÀ´Âú×ã
+        //ÔÚ Project Settings ÖĞ ÕÒµ½ Script Execute Order ÊÖ¶¯Ìí¼ÓÄãµÄ Manager Àà´úÂë£¬
+        //²¢½«ËüµÄÊıÖµÉèÖÃÎªÒ»¸ö¸ºÊı£¬ÀıÈç-20¡£Ö»ÒªÔÚ  Default Time Ö®ÉÏÔò»áÓÅÏÈÆäËû½Å±¾Ö´ĞĞ¡£
+
+        //¶©ÔÄ¹Û²ìÕß
+        GameManager.Instance?.AddObserver(this);
+
+        //»ñµÃµ¼º½ÍøÂçµÄOffMeshLink£¬²¢¿ªÆôagent
+        agent.ActivateCurrentOffMeshLink(true);
+
+        //ÖØÖÃÎÚ¹ê¿Ç
+        if (isDead && isTurtleShell)
+        {
+            TurtleDestroyWaitTime *= 0.618f;
+            ResetTurtleDestroy();
+        }
+    }
+
+    private void OnDisable()
     {
-        SwitchStates();
-        SwitchAnimation(); 
-        lastAttackTime -=Time.deltaTime;
-        
-    }    
+        //·ÀÖ¹ÓÎÏ·Í£Ö¹Ê±ÔÙ´Îµ÷ÓÃOnDisable±¨´í£¬È·ÈÏGameManagerÊÇ·ñÒÑ±»ÌáÇ°Ïú»Ù
+        if (!GameManager.IsInitialized) return;
+
+        //ÒÆ³ı¹Û²ìÕß
+        GameManager.Instance?.RemoveObserver(this);
+
+
+    }
+
+    protected virtual void Update()
+    {
+        if (characterStats.CurrentHealth == 0 && !isDead)
+        {
+            isDead = true;
+
+            //ÒÆ³ı¸½¼ÓÔÚÉíÉÏµÄÎïÌå£¨±ÈÈç¼ıÊ¸£©£¬ÒÔÃâÒ»Í¬±»Ïú»Ù
+            if (attachObjects.Count != 0)
+            {
+                foreach (var attach in attachObjects)
+                {
+                    if (attach)
+                        attach.transform.SetParent(null);
+                }
+                attachObjects.Clear();
+            }
+
+            //¹ÖÎïËÀÍöµôÂä
+            if (GetComponent<LootSpawner>())
+                GetComponent<LootSpawner>().Spawnloot();
+
+            //Íæ¼Ò»÷É±½±Àø
+            if (QuestManager.IsInitialized)
+                QuestManager.Instance.UpdateQuestProgress(enemyName, 1);
+
+            //Èç¹ûÊÇÃÎ÷ÊÊ·À³Ä·£ºÏÂ´Î½øÈë³¡¾°ºó£¬ÖØÖÃÍæ¼ÒµÈ¼¶
+            if (isNightmare)
+                SaveManager.Instance.ResetPlayerLevelInData();
+        }
+
+        if (!playerDead)
+        {
+            if (lastStateFrames < 0)
+            {
+                //¹ÖÎïAI²»ĞèÒªÃ¿Ö¡Ö´ĞĞ£¬¸ÄÎªÃ¿¸ô¼¸Ö¡Ö´ĞĞ
+                SwitchStates();
+                lastStateFrames = stateFrames;
+            }
+
+            //¹ÖÎïAI¸ÄÎª¼ä¸ôÖ´ĞĞºó£¬ÈÔĞèÒªÆ½»¬¿´ÏòÍæ¼ÒµÄĞ§¹û
+            if (lerpLookAtTime > 0 && AttackTarget != null)
+                LerpLookAt(AttackTarget.transform);
+
+            SwitchAnimation();
+            SwitchInsightLayer();
+            CheckNoisePlay();
+
+            //ÊÇ·ñ¼õ»ºCDË¢ĞÂ£¨±»HitºÍDizzyµÄÇé¿ö£©
+            if (!slowAttackRefresh)
+            {
+                lastAttackTime -= Time.deltaTime;
+                lastSkillTime -= Time.deltaTime;
+            }
+            else
+            {
+                lastAttackTime -= Time.deltaTime * 0.3f;
+                lastSkillTime -= Time.deltaTime * 0.5f;
+            }
+            
+            lastPatrolTime -= Time.deltaTime;
+
+            lastStateFrames--;
+        }
+    }
+
+    private void SwitchInsightLayer()
+    {
+        GameObject player = GameManager.Instance?.player;
+        CharacterStats playerStats = GameManager.Instance?.playerStats;
+
+        if (player == null || playerStats == null) return;
+
+        if (gameObject.layer == LayerMask.NameToLayer("Enemy Insight"))
+        {
+            //Àë¿ªOutsightRadiusµÄ¹ÖÎï£¬Èô²»ÊÇÍæ¼ÒµÄtarget£¬¹Ø±ÕÍ¸ÊÓ
+            if (!isTargetByPlayer &&
+                Vector3.Distance(transform.position, player.transform.position) > playerStats.OutSightRadius)
+            {
+                //¶ªÊ§Í¸ÊÓÓÃÑÓÊ±
+                if (!isLosingInsight)
+                {
+                    isLosingInsight = true;
+                    StartCoroutine("LoseInsightLater");
+                }
+            }
+        }
+        else
+        {
+            //½øÈëInsightRadiusÄÚµÄ¹ÖÎï£¬¿ªÆôÍ¸ÊÓ
+            //Íæ¼Òµ±Ç°µÄattackTarget£¬LongSightRadiusÄÚ¿ªÆô
+            //targetÊÇÍæ¼ÒµÄ¹ÖÎï£¬OutSightRadiusÄÚ¿ªÆô
+            if (isInsightedByPlayer
+                || (isTargetByPlayer &&
+                Vector3.Distance(transform.position, player.transform.position) <= playerStats.LongSightRadius)
+                || (attackTarget == player &&
+                Vector3.Distance(transform.position, player.transform.position) <= playerStats.OutSightRadius))
+
+            {
+                //¿ªÆôÍ¸ÊÓĞèÒªÏÈ¹Ø±ÕĞ­³Ì£¬´ı²âÊÔ
+                StopCoroutine("LoseInsightLater");
+                isLosingInsight = false;
+
+                //Á¢¼´»ñµÃ¸Ã¹ÖÎïµÄÍ¸ÊÓ
+                gameObject.layer = LayerMask.NameToLayer("Enemy Insight");
+                Transform[] childs = gameObject.transform.GetComponentsInChildren<Transform>();
+
+                //¶Ô×ÓÎïÌåÒ²¸üĞÂ
+                foreach (Transform trans in childs)
+                    trans.gameObject.layer = LayerMask.NameToLayer("Enemy Insight");
+
+                isInsightedByPlayer = true;
+            }
+        }
+    }
+
+    IEnumerator  LoseInsightLater()
+    {
+        yield return new WaitForSeconds(GameManager.Instance.playerStats.LossInsightTime);
+
+        //Ò»¶ÎÊ±¼äºó£¬¶ªÊ§¸Ã¹ÖÎïµÄÍ¸ÊÓ
+        gameObject.layer = LayerMask.NameToLayer("Enemy");
+        Transform[] childs = gameObject.transform.GetComponentsInChildren<Transform>();
+
+        //¶Ô×ÓÎïÌåÒ²¸üĞÂ
+        foreach(Transform trans in childs)
+            trans.gameObject.layer = LayerMask.NameToLayer("Enemy");
+
+        isInsightedByPlayer = false;
+
+    }
+
+    private void OnTriggerEnter(Collider other)
+    {
+        string tag = other.gameObject.tag;
+        switch (tag)
+        {
+            case "Bush":
+                //´©¹ı¹àÄ¾»á¼õËÙ£¡£¨ÈÎºÎÊ±ºò£©
+                agent.velocity *= characterStats.EnterBushSpeedRate;
+                break;
+        }
+    }
+
+    private void OnCollisionEnter(Collision collision)
+    {
+        //ÎÚ¹ê¿Çµ¥¶À´¦Àí
+        if(isTurtleShell &&isDead)
+        {
+            DeadShellOnCollisionEnter(collision);
+            return;
+        }
+
+        string tag = collision.gameObject.tag;
+        switch (tag)
+        {
+            case "Player":
+                if (!collision.gameObject.GetComponent<PlayerController>().isKickingOff) return;
+                //¹ÖÎïÓöµ½±»»÷·ÉÍæ¼Ò£¬µÍÉËº¦£¬ÓĞÑ£ÔÎ£¨ÎŞĞëÈ·ÈÏÍæ¼ÒÊÇ·ñ±»»÷·É£¬ÒòÎªÍæ¼ÒisKinematic¹Ø±Õ²Å»á´¥·¢£©
+
+                Vector3 tarPos = collision.gameObject.GetComponent<Transform>().position;
+                //¼ÆËãÉËº¦ÒªÓÃNavMeshAgentµÄËÙ¶È£¡
+                Vector3 tarVel = collision.gameObject.GetComponent<NavMeshAgent>().velocity;
+                //ÈôÍæ¼Ò³¯Ô¶Àë·½Ïò£¬Ôò²»»á´¥·¢
+                if (Vector3.Dot(tarVel, tarPos - transform.position) > 0.618f) break;
+
+                //¹ÖÎï³¯Ëæ»ú·½Ïò±»»÷ÍË£¨±»Íæ¼Ò£©
+                Vector3 addVel = (transform.position - tarPos).normalized * Random.Range(0f, 0.618f) +
+                    tarVel.normalized * Random.Range(0.382f, 0.618f);
+                addVel *= Mathf.Clamp(tarVel.magnitude, 0, 15f);
+
+                agent.velocity += addVel;
+
+                if (isDead) return; //¹ÖÎïËÀÍö£¬ÔòÖ»ÊÜµ½»÷ÍË
+
+                //¸ù¾İaddVelÊÜµ½ÉËº¦
+                int damage = (int)(addVel.magnitude * characterStats.HitByPlayerDamagePerVel);
+                //¹¥»÷´óÓÚ·ÀÓù£¬²Å»áÓĞHitĞ§¹û
+                if(damage> characterStats.CurrentDefence)
+                    animator.SetTrigger("Hit");
+                characterStats.TakeDamage(damage, collision.transform.position);
+
+                //Íæ¼ÒÒ²»áÊÜµ½ÉËº¦
+                damage = (int)(addVel.magnitude * characterStats.PlayerHurtDamagePerVel);
+                CharacterStats playerStats = collision.gameObject.GetComponent<CharacterStats>();
+                playerStats.TakeDamage(damage, transform.position);
+
+                //×²»÷ÒôĞ§
+                AudioManager.Instance.Play3DSoundEffect(SoundName.Enemy_by_Unarm, soundDetailList, transform, -0.15f);
+                break;
+        }
+    }
+
+    private void DeadShellOnCollisionEnter(Collision collision)
+    {
+        EnemyController enemy = null;
+        enemy = enemy.GetEnemy(collision.gameObject);
+
+        GameObject target = (enemy != null) ? enemy.gameObject : collision.gameObject;
+
+        Vector3 tarPos = target.GetComponent<Transform>().position;
+        int damage;
+
+        //¶ÔÕæÕıµÄtarget½øĞĞÅĞ¶Ï
+        string tag = target.tag;
+        switch (tag)
+        {
+            //ÎÚ¹ê¿Ç×²ÉÏ¹ÖÎï¡¢Boss»òÍæ¼Ò£¬³¯Ëæ»ú·½Ïò»÷ÍË
+            case "Enemy":
+            case "Boss":
+            case "Player":
+                //Èô³¯ÎÚ¹ê¿ÇÔ¶Àë·½Ïò£¬Ôò²»»á´¥·¢£¨ÓÃagentµÄËÙ¶È£¬¸ü¼°Ê±Ò»Ğ©£©
+                if (Vector3.Dot(agent.velocity, transform.position - tarPos) > 0.618f) break;
+
+                Vector3 addTargetVel = (tarPos - transform.position).normalized * Random.Range(1f, 1.5f) +
+                    agent.velocity.normalized * Random.Range(2f, 2.5f);
+                //ËÙ¶ÈÏŞÖÆ£¬ÓëÄ¿±êÑªÁ¿ÉÏÏŞÓĞ¹Ø
+                CharacterStats targetStats = target.GetComponent<CharacterStats>();
+                addTargetVel *= agent.velocity.magnitude / targetStats.MaxHealth * 15;
+
+                //¸½¼ÓËÙ¶ÈÓÃagent£¬¸üË¿»¬
+                NavMeshAgent targetAgent = target.GetComponent<NavMeshAgent>();
+                if (targetAgent.isOnNavMesh) targetAgent.isStopped = true;
+                targetAgent.velocity += addTargetVel;
+
+                if (agent.velocity.magnitude < 0.4399f) return; //ÎÚ¹ê¿ÇËÙ¶ÈÌ«Ğ¡¾ÍÃ»ÉËº¦ÁË
+
+                //¸ù¾İÎÚ¹ê¿Ç(×ÔÉí)ÊÇ·ñĞı×ª£¬Ôì³É10»ò20µãÉËº¦£¬ÎŞÊÓ·ÀÓù£¡
+                if (rigidBody.angularVelocity.magnitude < 7f)
+                    damage = 15;
+                else damage = 30;
+
+                //´óÎÚ¹ê¿ÇÉËº¦Ôö¼Ó
+                if (gameObject.tag == "Boss") damage *= 3;
+
+                //×¢ÒâÊÇ¶ÔÄ¿±êÔì³ÉÉËº¦ºÍÊÜ»÷¶¯»­
+                if (targetStats.CurrentHealth > 0)
+                {
+                    targetStats.CurrentHealth = Mathf.Max(targetStats.CurrentHealth - damage, 0);
+                    //Èç¹û»÷É±Ä¿±ê£¬Íæ¼ÒUpdate¾­ÑéÖµ£¨CurrentHealth>0£¬·ÀÖ¹¶à´Î¼Ó¾­Ñé£©
+                    if (targetStats.CurrentHealth <= 0)
+                        FindObjectOfType<PlayerController>().GetComponent<CharacterStats>().
+                            characterData.UpdateExp(targetStats.characterData.killPoint);
+
+                    target.GetComponent<Animator>().SetTrigger("Hit");
+
+                    //¹ÖÎï¸üĞÂÍ¸ÊÓ¡¢ÑªÌõUI
+                    PlayerController playerCtl = 
+                        GameManager.Instance.player.GetComponent<PlayerController>();
+                    playerCtl.SwitchLongSightTargets(target);
+                    targetStats.UpdateHealthBarAtOnce();
+                    //Boss¸üĞÂ´óÑªÌõ
+                    BossHealthUI.Instance.WakeUpBossHealthBar(target);
+                }
+                //×²µ½ÎïÌå·´µ¯£¬²¢ÇÒËÙ¶È¸ü¿ì£¨£¿£©
+                agent.velocity = (transform.position - tarPos).normalized * agent.velocity.magnitude;
+
+                break;
+            case"Tree":
+            case "Big Stone":
+            case "Attackable":
+                //×²µ½ÎïÌå·´µ¯£¬²¢ÇÒËÙ¶È¸ü¿ì£¨£¿£©
+                agent.velocity = (transform.position - tarPos).normalized * agent.velocity.magnitude;
+
+                break;
+        }
+    }
+
     void SwitchAnimation()
     {
-        anim.SetBool("Walk",isWalk);
-        anim.SetBool("Chase",isChase);
-        anim.SetBool("Follow",isFollow);
-        anim.SetBool("Critical",characterStats.isCritical);
+        animator.SetBool("Walk", isWalk);
+        animator.SetBool("Chase", isChase);
+        animator.SetBool("Follow", isFollow);
+        animator.SetBool("Critical", characterStats.isCritical);
+        animator.SetBool("Death", isDead);
+
+        animator.SetFloat("IdleBlend", idleBlend);
     }
+
     void SwitchStates()
     {
-        //å¦‚æœå‘ç°player åˆ‡æ¢åˆ°CHASE
-        if(FoundPlayer())
+        isFoundPlayer = FoundPlayer();
+
+        if (isDead)
+            enemyBehaviorState = EnemyBehaviorState.DEAD;
+        else
+        if (isFoundPlayer && !isEscaping && !isCrossingPlayerPos)
+            enemyBehaviorState = EnemyBehaviorState.CHASE; //Èç¹û·¢ÏÖPlayer£¬ÇĞ»»µ½CHASE
+
+        switch (enemyBehaviorState)
         {
-            enemyStates=EnemyStates.CHASE;
-        }
-        switch (enemyStates)
-        {
-            case EnemyStates.GUARD:
-                break;
-            case EnemyStates.PATROL:
+            case EnemyBehaviorState.GUARD:
+                if (!isGuard)
+                {
+                    enemyBehaviorState = EnemyBehaviorState.PATROL;
+                    return;
+                }
                 isChase = false;
-                agent.speed = 0.5f*speed;
-                //åˆ¤æ–­æ˜¯å¦èµ°åˆ°å·¡é€»ç‚¹
-                if(Vector3.Distance(wayPoint,transform.position)<= agent.stoppingDistance)
+                agent.speed = agentSpeed * 0.5f;
+
+                if (lastPatrolTime < 0 || Vector3.Magnitude(guardPos - transform.position) > agent.stoppingDistance)
+                {
+                    isWalk = true;
+                    lastPatrolTime = Random.Range(2f, 8f);
+
+                    if (!agent.pathPending && agent.isOnNavMesh && agent.destination != guardPos)
+                    {
+                        agent.isStopped = false;
+                        agent.stoppingDistance = 0.5f;
+
+                        if (NavMesh.SamplePosition(guardPos, out navMeshHit, patrolRange, 1))
+                            agent.destination = guardPos;
+                    }
+                }
+                else
                 {
                     isWalk = false;
-                    if(remainLookAtTime>0)
-                        remainLookAtTime-=Time.deltaTime;
+                    agent.stoppingDistance = stopDistance;
+
+                    if (remainLookAtTime > 0)
+                    {
+                        remainLookAtTime -= Time.deltaTime * stateFrames;
+                        //Ëæ»úÑ²ÂßµãIdle¶¯»­
+                        if (idleBlend == 0f) idleBlend = Random.value;
+
+                        //¹ÖÎï³¯Ëæ»ú·½Ïò½øĞĞLerp
+                        transform.rotation = Quaternion.Lerp(transform.rotation, lookAtRotation, 0.0618f);
+
+                        noFirstRandomLookAt = false;
+                    }
                     else
                     {
-                        GetNewWayPoint();
+                        if (!noFirstRandomLookAt)
+                            StartCoroutine("GuardRandomLookAt");
+                        noFirstRandomLookAt = true;
+                        idleBlend = 0f;
                     }
+                }
+                break;
+            case EnemyBehaviorState.PATROL:
+                if (isGuard)
+                {
+                    enemyBehaviorState = EnemyBehaviorState.GUARD;
+                    return;
+                }
+                isChase = false;
+                agent.speed = agentSpeed * 0.5f;
+                agent.stoppingDistance = 0.5f;
 
+                //ÅĞ¶ÏÊÇ·ñµ½ÁËËæ»úÑ²Âßµã
+                if (lastPatrolTime < 0 || Vector3.Distance(wayPoint, transform.position) <= agent.stoppingDistance)
+                {
+                    isWalk = false;
+                    lastPatrolTime = Random.Range(2f, 8f);
+
+                    if (remainLookAtTime > 0)
+                    {
+                        remainLookAtTime -= Time.deltaTime * stateFrames;
+                        //Ëæ»úÑ²ÂßµãIdle¶¯»­
+                        if (idleBlend == 0f && remainLookAtTime > lookAtMinTime)
+                            idleBlend = Random.value;
+
+                    }
+                    else
+                    {
+                        idleBlend = 0f;
+                        GetPatrolWayPoint();
+                    }
                 }
                 else
                 {
                     isWalk = true;
-                    agent.destination = wayPoint;
+
+                    //·ÀÖ¹NavMesh¶¯Ì¬¼ÓÔØÊ±£¬±ßÔµ¹ÖÎïµÄÑ²Âß±¨´í
+                    if (!agent.pathPending && agent.destination != wayPoint)
+                    {
+
+                        if(agent.isOnNavMesh)
+                        {
+                            agent.isStopped = false;
+                            agent.destination = wayPoint;
+                            //·ÀÖ¹¹ÖÎï¿¨×¡²»¶¯ 
+                            if (agent.velocity.magnitude == 0) agent.velocity = transform.forward;
+                        }
+                        else //·ÀÖ¹¹ÖÎï¿¨×¡²»¶¯
+                        agent.velocity = transform.forward * agent.speed;
+                    }
                 }
-                
                 break;
-            case EnemyStates.CHASE:
+            case EnemyBehaviorState.CHASE:
+
                 isWalk = false;
                 isChase = true;
-                agent.speed = speed;
-                //è¿½Player
-                if(!FoundPlayer())
+                agent.speed = agentSpeed;
+                idleBlend = 0f;
+                agent.stoppingDistance = stopDistance;
+
+                remainChaingTime -= Time.deltaTime * stateFrames;
+                //if (gameObject.name == "TurtleShell")
+                //    Debug.Log("Turtle remain Chasing Time£º" + remainChaingTime);
+
+                if (!isFoundPlayer || remainChaingTime < 0)
                 {
-                    //TODO:æ‹‰è„±å›åˆ°ä¸Šä¸€ä¸ªçŠ¶æ€
+                    //À­ÍÑ£¬»Øµ½ÉÏÒ»¸ö×´Ì¬
                     isFollow = false;
-                    if(remainLookAtTime>0)
+                    if (agent.isOnNavMesh) agent.isStopped = true;
+                    lerpLookAtTime = -1;
+                    attackTarget = null;
+
+                    if (remainLookAtTime > 0)
                     {
-                        agent.destination = transform.position;
-                        remainLookAtTime -= Time.deltaTime;
+                        remainLookAtTime = - Time.deltaTime * stateFrames;
                     }
-                    else if(isGuard)
-                        enemyStates=EnemyStates.GUARD;
                     else
-                        enemyStates=EnemyStates.PATROL; 
+                    {
+                        if(isFoundPlayer)
+                        {
+                            //Debug.Log(gameObject.name+ " Stop Chasing -> CheckEscape()");
+                            //Éè¶¨ÌÓÅÜ·½ÏòÎªÑ²Âßµã
+                            escapeDirection = guardPos - transform.position;
+                            escapeDirection.y = 0;
+                            escapeDirection.Normalize();
+
+                            //ÇĞ»»ÌÓÅÜ×´Ì¬£¬²»ÔÙ×·Íæ¼Ò
+                            CheckEscape(false, true);
+                        }
+                        else
+                        {
+                            //·µ»ØÑ²Âß×´Ì¬
+                            //Debug.Log(gameObject.name + " Stop Chasing -> GUARD or PATROL");
+                            if (isGuard)
+                                enemyBehaviorState = EnemyBehaviorState.GUARD;
+                            else
+                                enemyBehaviorState = EnemyBehaviorState.PATROL;
+                        }
+
+                        remainChaingTime = Random.Range(10f, 60f);
+                    }
+
+                }
+                else if (attackTarget != null && 
+                    Vector3.Distance(attackTarget.transform.position, transform.position) > agent.stoppingDistance)
+                {
+                    isFollow = true;
+                    if (agent.isOnNavMesh)
+                    {
+                        agent.isStopped = false;
+                        if (!agent.pathPending)
+                            agent.destination = attackTarget.transform.position;
+                        //·ÀÖ¹¹ÖÎï¿¨×¡²»¶¯ 
+                        if (agent.velocity.magnitude == 0) agent.velocity = transform.forward;
+                    }
+                    else //·ÀÖ¹¹ÖÎï¿¨×¡²»¶¯ 
+                        agent.velocity = agent.speed * transform.forward;
+                }
+                else //¸ù¾İËÙ¶È¾ö¶¨ÒÆ¶¯¶¯»­
+                    isFollow = agent.velocity.magnitude > 0.1f;
+
+
+                //ÔÚ¹¥»÷·¶Î§ÄÚÔò¹¥»÷
+                if (TargetInAttackRange() || TargetInSkillRange())
+                {
+                    if (lastAttackTime > Mathf.Min(Random.Range(0.5f, 1.5f),
+                        characterStats.AttackCoolDown * characterStats.EnemyAttackDuring))
+                        lerpLookAtTime = 0.382f; //¹¥»÷Ç°Ò¡Ê±ÄÜ¹»Æ½»¬Ãæ³¯Íæ¼Ò
+
+                    if (lastAttackTime < 0)
+                    {
+                        //±©»÷ÅĞ¶Ï
+                        characterStats.isCritical = Random.value < characterStats.CriticalChance;
+                        Attack();
+                    }
+                }
+                break;
+
+            case EnemyBehaviorState.ESCAPE:
+                //ÌÓÅÜ×´Ì¬£¬³¯ÌÓÅÜ·½ÏòÈ«Á¦ÌÓÀë
+                isWalk = false;
+                isChase = true;
+                idleBlend = 0f;
+                remainEscapeTime -= Time.deltaTime * stateFrames;
+                //¸ù¾İÑªÁ¿Ê£Óà£¬ËÙ¶ÈÉÏÏŞ»áÌáÉı»òÕßÏÂ½µ
+                agent.speed = Mathf.Lerp(1.5f, escapeSpeed,
+                    (float)characterStats.CurrentHealth / (characterStats.MaxHealth * 0.3f));
+
+                if (remainEscapeTime<0)
+                {
+                    //ÌÓÀëÊ±¼ä½áÊø
+                    if(isFoundPlayer)
+                    { //·µ»Ø×·»÷×´Ì¬
+                        enemyBehaviorState = EnemyBehaviorState.CHASE;
+                        lerpLookAtTime = 0.618f;
+                    }
+                    else
+                    { //·µ»ØÑ²Âß×´Ì¬
+                        if (isGuard)
+                            enemyBehaviorState = EnemyBehaviorState.GUARD;
+                        else
+                            enemyBehaviorState = EnemyBehaviorState.PATROL;
+                    }
+                    //Çå³ı±ê¼Ç£¡
+                    isEscaping = false;
                 }
                 else
                 {
-                    isFollow=true;
-                    agent.isStopped=false;
-                    agent.destination=attackTarget.transform.position;
-                }
-
-            //TODO:åœ¨æ”»å‡»èŒƒå›´æ”»å‡»
-                if(TargetInAttackRange()||TargetInSkillRange())
-                {
-                    isFollow = false;
-                    agent.isStopped =true;
-                    if(lastAttackTime<0)
+                    //³¯Ö¸¶¨·½ÏòÌÓÀë
+                    isFollow = true;
+                    if(agent.isOnNavMesh)
                     {
-                        lastAttackTime=characterStats.attackDate.coolDown;
-                        //æš´å‡»åˆ¤æ–­
-                        characterStats.isCritical = Random.value<characterStats.attackDate.criticalChance;
-                        Attack();
-                        //æ‰§è¡Œæ”»å‡»
+                        agent.isStopped = false;
+                        if (!agent.pathPending)
+                        {
+                            Vector3 destination = transform.position + escapeDirection * 15f;
+                            if(destination.IsOnGround(out upHighDownHit))
+                            {
+                                destination.y = upHighDownHit.point.y;
+                                if (NavMesh.SamplePosition(destination, out navMeshHit, patrolRange, 1))
+                                    agent.destination = navMeshHit.position;
+                                //Èç¹ûÕÒ²»µ½Ä¿±êµã£¬Ôò¸ü¸ÄÌÓÅÜ·½Ïò
+                                else CheckEscape(true);
+                                //·ÀÖ¹¹ÖÎï¿¨×¡²»¶¯ 
+                                if (agent.velocity.magnitude == 0) agent.velocity = transform.forward;
+                            }
+                            else CheckEscape(true);
+                        }
                     }
-
+                    else //·ÀÖ¹¹ÖÎï×·ÖğÊ±¿¨×¡²»¶¯
+                        if (agent.velocity.magnitude == 0)
+                        agent.velocity = agent.speed * transform.forward;
                 }
-            //TODO:é…åˆåŠ¨ç”»
+
                 break;
-            case EnemyStates.DEAD:
+            case EnemyBehaviorState.CROSS_PLAYER_POS:
+                //ÈÆºó×´Ì¬£¬ÊÔÍ¼Ô½¹ıÍæ¼ÒÎ»ÖÃ
+                isWalk = false;
+                isChase = true;
+                idleBlend = 0f;
+                remainEscapeTime -= Time.deltaTime * stateFrames;
+
+                if (remainEscapeTime > 0 && Vector3.Distance(wayPoint, transform.position) > agent.stoppingDistance)
+                {
+                    isFollow = true;
+                    //Ç°ÍùÈÆºóµÄÄ¿±êµã
+                    if (agent.isOnNavMesh)
+                    {
+                        agent.isStopped = false;
+                        if (!agent.pathPending) agent.destination = wayPoint;
+
+                        //·ÀÖ¹¹ÖÎï¿¨×¡²»¶¯ 
+                        if (agent.velocity.magnitude == 0) agent.velocity = transform.forward;
+                    }
+                    else //·ÀÖ¹¹ÖÎï×·ÖğÊ±¿¨×¡²»¶¯
+                        if (agent.velocity.magnitude == 0)
+                        agent.velocity = agent.speed * transform.forward;
+
+                    //Í£Ö¹¶ªÊ§Ä¿±ê£¬±£³Ö¶ÔÍæ¼ÒµÄÄ¿±êËø¶¨
+                    noFirstLostTarget = false;
+                    StopCoroutine(LoseTarget());
+                }
+                else
+                {
+                    //·µ»Ø×·»÷×´Ì¬
+                    enemyBehaviorState = EnemyBehaviorState.CHASE;
+                    isCrossingPlayerPos = false;
+                    lerpLookAtTime = 0.618f;
+                    //Çå³ı±ê¼Ç£¡
+                    isEscaping = false;
+                }
+
+                break;
+            case EnemyBehaviorState.DEAD:
+                if(agent.isOnNavMesh) agent.isStopped = true;
+
+                if (!isTurtleShell)
+                {
+                    coll.enabled = false;
+
+                    //Ö±½Ó¹Ø±Õagent£¬»áµ¼ÖÂStopAgentÎŞ·¨»ñÈ¡NavMashAgent±¨´í
+                    //agent.enabled = false;
+                    //½â¾ö·½·¨£ºÉèÖÃradiusÎª0£¬´Ó¶øÍæ¼Ò¿ÉÒÔ´©¹ıËÀÍöÄ¿±ê
+                    agent.radius = 0;
+
+                    if (!isDestroying)
+                    {
+                        ////ÒÆ³ı¸½¼ÓÔÚÉíÉÏµÄÎïÌå£¨±ÈÈç¼ıÊ¸£©£¬ÒÔÃâÒ»Í¬±»Ïú»Ù
+                        //foreach (var attach in attachObjects)
+                        //{
+                        //    if (attach)
+                        //        attach.transform.SetParent(null);
+                        //}
+                        Destroy(gameObject, 2f);
+                        //ËÀÍöºóÖØĞÂÉú³É
+                        GameManager.Instance.InstantiateEnemy(gameObject, gameObject.transform.position, numInArray);
+
+                        isDestroying = true;
+                    }
+                }
+                else
+                {
+                    //¶ÔÎÚ¹ê½øĞĞÌØÊâ´¦Àí£¬ËÀÍöºó²»»áÁ¢¼´ÏûÊ§£¬¿É»÷´ò×²»÷ÆäËûÄ¿±ê
+                    if (!isTurtleShellDestroying)
+                    {
+                        //·Å´óÅö×²Ìå£¬ÈÃÎÚ¹ê¿Ç¸üÈİÒ×ÃüÖĞ
+                        BoxCollider boxCol = (BoxCollider)coll;
+                        boxCol.size *= 1.618f;
+                        boxCol.center = new Vector3(boxCol.center.x, boxCol.center.y * 1.618f, boxCol.center.z);
+                        
+                        ResetTurtleDestroy();
+                        isTurtleShellDestroying = true;
+                    }
+                }
                 break;
         }
     }
-    void Attack()
+
+    internal void CheckCrossPlayer()
     {
-        transform.LookAt(attackTarget.transform);
-        if(TargetInAttackRange())
+        //¹ÖÎï¹¥»÷ºó£¬ÓĞ¼¸ÂÊÔ½¹ıÍæ¼ÒÎ»ÖÃ
+        if (attackTarget == null || Random.value > characterStats.EnemyCrossPlayerRate) return;
+
+
+        Vector3 dir = attackTarget.transform.position - transform.position;
+        //Æ«ÒÆµÄ·½Ïò
+        Vector3 bias = Random.onUnitSphere;
+        bias.y = 0;
+        bias.Normalize();
+        //Èç¹ûÍæ¼Ò±³³¯×Ô¼º£¬Ôò±£Ö¤Ô½¹ıÍæ¼Ò£¨·ñÔòÈÎÒâ×ßÎ»£©
+        if(Vector3.Dot(transform.forward,attackTarget.transform.forward)>0)
         {
-            //è¿›ç¨‹åŠ¨ç”»
-            anim.SetTrigger("Attack");
+            if (Vector3.Dot(bias, dir.normalized) < 0) bias = -bias;
+            //Èç¹ûÈÔÔÚ60¶È¼Ğ½ÇÍâ£¬½øÒ»²½ĞŞÕı
+            if (Vector3.Dot(bias, dir.normalized) < 0.5f)
+                bias = (dir.normalized + bias).normalized;
         }
-        if(TargetInSkillRange())
+        //¾ö¶¨×îÖÕ·½Î»¾àÀë
+        dir += bias * characterStats.AttackRange * Random.Range(1f, 3f);
+
+        //Èç¹û³É¹¦ÕÒµ½ÒÆ¶¯µã£¬ÔòÇĞ»»×´Ì¬
+        if(NavMesh.SamplePosition(transform.position + dir, out navMeshHit, characterStats.AttackRange, 1))
         {
-            //è¿œç¨‹åŠ¨ç”»
-            anim.SetTrigger("Skill");
+            wayPoint = navMeshHit.position;
+            enemyBehaviorState = EnemyBehaviorState.CROSS_PLAYER_POS;
+            lerpLookAtTime = -1;
+            isCrossingPlayerPos = true;
+
+            //ÒÆ¶¯ËÙ¶ÈÔİÊ±ÌáÉı£¡
+            agent.speed = agentSpeed * 2f;
+
+            remainEscapeTime = Random.Range(2f, 4f);
+        }    
+    }
+
+    protected virtual void Attack()
+    {
+        lerpLookAtTime = 0.382f;
+        //transform.LookAt(attackTarget.transform);
+
+        Vector3 direction = attackTarget.transform.position - transform.position;
+        float distance = direction.magnitude;
+
+        //Èç¹ûÃ»ÓĞÃæ³¯Íæ¼Ò£¬Ôò²»¹¥»÷
+        if (Vector3.Dot(transform.forward, direction.normalized) < characterStats.attackData.enemyAtkCosin)
+            return;
+
+        //SkillºÍAttackµÄ´¥·¢Âß¼­£ºSkillÓÅÏÈ´¥·¢
+        if (TargetInSkillRange() && lastSkillTime < 0)
+        {
+            isFollow = false;
+            //Ëæ»ú¼¼ÄÜÀäÈ´Ê±¼ä
+            lastSkillTime = characterStats.SkillCoolDowm * Random.value;
+            //¼¼ÄÜ¹¥»÷¶¯»­
+            animator.SetTrigger("Skill");
+
+            if (agent.isOnNavMesh) agent.isStopped = true;
+        }
+        else
+        if (TargetInAttackRange())
+        {
+            isFollow = false;
+            //ÖØÖÃ¹¥»÷Ê±¼ä£¬Èç¹û±©»÷£¬CD¸ü¾Ã
+            if (characterStats.isCritical)
+                lastAttackTime = characterStats.AttackCoolDown * Random.Range(1.618f, 2.718f);
+            else
+                lastAttackTime = characterStats.AttackCoolDown;
+            //½üÉí¹¥»÷¶¯»­
+            animator.SetTrigger("Attack");
+
+            if (agent.isOnNavMesh) agent.isStopped = true;
         }
     }
+
+    private void LerpLookAt(Transform targetTransform)
+    {
+        if (isDead) return;
+
+        Vector3 tarDir = targetTransform.position - transform.position;
+        tarDir.y = 0;
+        Quaternion tarRot = Quaternion.FromToRotation(Vector3.forward, tarDir);
+
+        //Ìå»ıÔ½´ó£¬×ªÉíÔ½Âı
+        float lerpSpeed = 0.06f / Mathf.Max(transform.localScale.x, transform.localScale.y);
+        lerpSpeed = Mathf.Max(lerpSpeed, 0.006f) * lerpRotationRate;
+
+        transform.rotation = Quaternion.Lerp(transform.rotation, tarRot, lerpSpeed);
+    }
+
     bool FoundPlayer()
     {
-        var colliders = Physics.OverlapSphere(transform.position,sightRadius);
-        foreach(var target in colliders)
+        if (findAttacker || isCrossingPlayerPos)
         {
-            if(target.CompareTag("Player"))
-            {
-                attackTarget=target.gameObject;
-                return true;
-            }
+            //Ôâµ½Íæ¼Ò¹¥»÷ºó£¬Á¢¼´·¢ÏÖÍæ¼Ò
+            findAttacker = false;
+            return true;
         }
-        attackTarget=null;
+
+        //Ô¶¾àÀëÄ¿±êÒ²¼ÓÈë¼ì²â£¬ÒòÎªCHASE×´Ì¬ÏÂÊÓÒ°°ë¾¶·­±¶£¨ÊÂÊµÉÏÄ¿±êÖ»ÓĞÍæ¼Ò£©
+        playerCols = Physics.OverlapSphere(transform.position, sightRadius * 2, LayerMask.GetMask("Player"));
+        foreach (var player in playerCols)
+            if (player.CompareTag("Player"))
+            {
+                RaycastHit hit;
+                Vector3 eyePos = eyeBall.transform.position; //ÑÛ¾¦Î»ÖÃ
+                Vector3 eyeFoward = GetEyeForward(eyeBall); //¹ÖÎïÑÛ¾¦³¯Ïò
+                //ÅĞ¶ÏÊÓÏßÊÇ·ñ±»ÕÚµ²
+                Vector3 targetDir1 = player.transform.position - transform.position;
+                Vector3 targetDir2 = player.transform.position - eyePos;
+
+                float angle = Vector3.Angle(eyeFoward, targetDir1);
+                //Debug.Log(gameObject.ToString() + " angle: " + angle + " |  Radius: " + targetDir1.magnitude);
+
+                //Chase×´Ì¬ÏÂ£ºÈô²»ÔÚÊÓÒ°ÄÚ£¬ÇÒÔÚ1±¶ÊÓÒ°·¶Î§Íâ
+                if (enemyBehaviorState == EnemyBehaviorState.CHASE &&
+                    (angle > halfSightAngle && targetDir1.magnitude > sightRadius)) break;
+                //·ÇChase×´Ì¬ÏÂ£ºÈô²»ÔÚÊÓÒ°ÄÚ£¬»òÔÚ1±¶ÊÓÒ°·¶Î§Íâ
+                if (enemyBehaviorState != EnemyBehaviorState.CHASE &&
+                    (angle > halfSightAngle || targetDir1.magnitude > sightRadius)) break;
+
+                //ÈôÎŞÕÚµ²¿´¼ûÍæ¼Ò£¬ÉèÖÃ×·»÷Ä¿±ê£»µÚ¶şÌõÉäÏßÏàÍ¬ÅĞ¶Ï
+                if ((Physics.Raycast(eyePos, targetDir1, out hit, sightRadius) &&
+                    hit.transform.gameObject.tag == "Player")
+                    || (Physics.Raycast(eyePos, targetDir2, out hit, sightRadius) &&
+                    hit.transform.gameObject.tag == "Player"))
+                {
+                    //»ñµÃÄ¿±ê£¬¸üĞÂÍ¸ÊÓ
+                    attackTarget = player.gameObject;
+                    SwitchInsightLayer();
+
+                    //Í£Ö¹¶ªÊ§Ä¿±ê£¬ÖØÖÃnoFirstLostTarget
+                    noFirstLostTarget = false;
+                    StopCoroutine("LoseTarget");
+
+                    return true;
+                }
+
+                break; //Ã¶¾Ùµ½Player£¬¾Í¿ÉÒÔÍ£Ö¹ÁË
+            }
+        //attackTarget = null;
+        if (!noFirstLostTarget)
+        {
+            //Ö»ÓĞÔÚµÚÒ»´Î¶ªÊ§Ä¿±êµÄÊ±ºò£¬»áµ÷ÓÃLossTargetĞ­³Ì
+            noFirstLostTarget = true;
+            StartCoroutine("LoseTarget");
+        }
+
+        //Ä¿±êÉĞÎ´¶ªÊ§
+        if (attackTarget != null) return true;
+
+        //Ä¿±êÒÑ¶ªÊ§
         return false;
-    }//å¯»æ‰¾player
-    bool TargetInAttackRange()
-    {
-        if(attackTarget!=null)
-            return Vector3.Distance(attackTarget.transform.position,transform.position)<=characterStats.attackDate.attackRange;
-        else 
-            return false;
-    }
-    bool TargetInSkillRange()
-    {
-        if(attackTarget!=null)
-            return Vector3.Distance(attackTarget.transform.position,transform.position)<=characterStats.attackDate.skillRange;
-        else 
-            return false;
-    }
-        void GetNewWayPoint()
-    {
-        remainLookAtTime = lookAtTime;
-        float randomX = Random.Range(-patrolRange,patrolRange);
-        float randomZ = Random.Range(-patrolRange,patrolRange);
-        Vector3 randomPoint = new Vector3(guardPos.x+randomX,transform.position.y,guardPos.z+randomZ);
-        NavMeshHit hit;
-        wayPoint=NavMesh.SamplePosition(randomPoint,out hit,patrolRange,1)?hit.position:transform.position;//
     }
 
-    void  OnDrawGizmosSelected() 
+    internal void CheckEscape(bool forceChangeDir = false, bool forceEscape = false)
     {
+        //Ç¿ÖÆ½øÈëÌÓÅÜ×´Ì¬
+        isEscaping = isEscaping || forceEscape;
+
+        float healthRate = (float)characterStats.CurrentHealth / characterStats.MaxHealth;
+        //ÑªÁ¿1/3ÒÔÉÏÊ±£¬²»»á½øÈëÌÓÅÜ×´Ì¬
+        if (!isEscaping && healthRate > 0.3f) return;
+        //ÑªÁ¿»Ö¸´ÖÁ°ëÑªÒÔÉÏ£¬½áÊøÌÓÅÜ×´Ì¬
+        if (healthRate > 0.5f && !forceEscape)
+        { isEscaping = false; return; }
+
+        //ÊÜ¹¥»÷Ê±Ò»¶¨¼¸ÂÊÌÓÅÜ£»Èô½øÈëÌÓÅÜ×´Ì¬£¬ÔòÃ¿´ÎÊÜ¹¥»÷¶¼»á´¥·¢
+        if (!isEscaping && Random.value > characterStats.EscapeRate) return;
+
+        //¹ÖÎï½øÈëÌÓÅÜ×´Ì¬
+        enemyBehaviorState = EnemyBehaviorState.ESCAPE;
+        isEscaping = true;
+        lerpLookAtTime = -1;
+
+        //Éè¶¨ÌÓÅÜ·½Ïò
+        if (forceChangeDir || Random.value < escapeDirChangeRate)
+        {
+            escapeDirection = Random.onUnitSphere;
+            escapeDirection.y = 0;
+            escapeDirection.Normalize();
+
+            //ÈôÖªµÀÍæ¼ÒÔÚÄÄ£¬Ôò±£Ö¤Ô¶ÀëÍæ¼Ò·½Ïò£¨forceChangeDirÓÃÓÚ±ÜÃâ×²Ç½£©
+            if (!forceChangeDir && isFoundPlayer &&
+                Vector3.Dot(escapeDirection, GameManager.Instance.player.transform.forward) < 0)
+                escapeDirection = -escapeDirection;
+
+            //ÏÂ´Î¸Ä±ä³¯ÏòµÄ¼¸ÂÊ·¢Éú±ä»¯
+            escapeDirChangeRate = Random.Range(0.2f, 0.8f);
+        }
+
+        //¸ù¾İÑªÁ¿Ê£Óà£¬ËÙ¶ÈÉÏÏŞ»áÌáÉı»òÕßÏÂ½µ
+        agent.speed = Mathf.Lerp(2f, escapeSpeed, (float)characterStats.CurrentHealth / (characterStats.MaxHealth * 0.3f));
+
+        //ÖØÖÃÌÓÀë×´Ì¬µÄ³ÖĞøÊ±¼ä
+        if (!forceChangeDir)
+            remainEscapeTime = Random.Range(5f, 15f);
+
+        //³õ´ÎÉè¶¨ÌÓÅÜ£¬¿¼ÂÇ³£¼ûÎÊÌâ
+        if (agent.isOnNavMesh)
+        {
+            agent.isStopped = false;
+            Vector3 destination = transform.position + escapeDirection * 5f;
+            if (destination.IsOnGround(out upHighDownHit))
+            {
+                destination.y = upHighDownHit.point.y;
+                if (NavMesh.SamplePosition(destination, out navMeshHit, patrolRange, 1))
+                    agent.destination = navMeshHit.position;
+            }
+            else
+            {
+                escapeDirection = -escapeDirection;
+                agent.destination = GameManager.Instance.player.transform.position + escapeDirection * 5f;
+            }
+            //·ÀÖ¹¹ÖÎï¿¨×¡²»¶¯ 
+            if (agent.velocity.magnitude == 0) agent.velocity = transform.forward;
+        }
+        else agent.velocity = agent.speed * transform.forward;
+    }
+
+    IEnumerator LoseTarget()
+    {
+        yield return new WaitForSeconds(lossTargetTime);
+
+        //¾­¹ılossTargetTimeºó£¬Ä¿±ê¶ªÊ§£»¸üĞÂÍ¸ÊÓ²ã
+        attackTarget = null;
+        SwitchInsightLayer();
+
+    }
+    IEnumerator GuardRandomLookAt()
+    {
+        //Ëæ»úGuardÊ±¼ä£¬guardKeepMinTimeµÄ1~3±¶
+        yield return new WaitForSeconds(guardKeepMinTime * (1f + Random.value * 2));
+
+        remainLookAtTime = lookAtMinTime * (1f + Random.value);  //Ëæ»ú1~2±¶LookAtÊ±¼ä
+        if (idleBlend == 0f) idleBlend = Random.value;
+        //Guard×´Ì¬ÏÂ£¬ÉèÖÃÏÂ´ÎËæ»ú³¯Ïò
+        float yRotNextLookAt = Random.Range(-1.0f, 1.0f) * (90 - halfSightAngle);
+        lookAtRotation = Quaternion.AngleAxis(yRotNextLookAt, Vector3.up) * guardRotation;
+    }
+
+    protected bool TargetInAttackRange()
+    {
+        if (attackTarget != null)
+            return Vector3.Distance(attackTarget.transform.position, transform.position)
+                <= characterStats.AttackRange;
+        else
+            return false;
+    }
+
+    protected virtual bool TargetInSkillRange()
+    {
+        if (attackTarget != null)
+            return Vector3.Distance(attackTarget.transform.position, transform.position)
+                <= characterStats.SkillRange;
+        else
+            return false;
+    }
+
+    void GetPatrolWayPoint()
+    {
+        if (!GameManager.Instance.player) return;
+
+        //Ëæ»úlookAtÊ±¼ä
+        remainLookAtTime = lookAtMinTime * Random.value * 2;
+
+        float randomX = Random.Range(-patrolRange, patrolRange);
+        float randomZ = Random.Range(-patrolRange, patrolRange);
+
+        Vector3 randomPoint = new Vector3(guardPos.x + randomX,
+            transform.position.y, guardPos.z + randomZ);
+
+        if (Vector3.Distance(randomPoint, transform.position) < 2f)
+        {
+            //·ÀÖ¹ÒÆ¶¯¾àÀëÌ«¶Ì£¬ÏÔµÃºÜ´ô
+            randomPoint = (randomPoint - transform.position).normalized
+                * Random.Range(0.5f * patrolRange, 1.5f * patrolRange) + transform.position;
+        }
+
+        //ĞŞÕıËæ»úµãÎ»ÖÃ£¬Ê¹ÆäÔÚGroundÉÏ
+        if (randomPoint.IsOnGround(out upHighDownHit))
+            randomPoint = upHighDownHit.point;
+        else
+        {
+            //Ëæ»úµãÈç¹û³¬³öµØÍ¼£¬³¯Íæ¼Ò·½Ïò½øĞĞÒ»´ÎĞŞÕı
+            randomPoint =
+                (randomPoint + GameManager.Instance.player.transform.position) * 0.6f;
+        }
+
+        //·ÀÖ¹NavMesh×²Ç½¿¨×¡£¬µ÷ÓÃSamplePositionĞŞ¸´
+        //NavMesh.GetAreaFromName("Walkable") == 1
+        wayPoint = NavMesh.SamplePosition(randomPoint, out navMeshHit, patrolRange, 1) ?
+            navMeshHit.position : randomPoint +
+            (GameManager.Instance.player.transform.position - randomPoint) 
+            * Random.Range(-0.3f, 0.3f);
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        Gizmos.color = Color.red;
+        Gizmos.DrawWireSphere(transform.position, sightRadius);
+        Vector3 eyePos = eyeBall.transform.position;
+        Gizmos.DrawLine(eyePos, eyePos + GetEyeForward(eyeBall) * sightRadius * 2);
+
         Gizmos.color = Color.blue;
-        Gizmos.DrawWireSphere(transform.position,sightRadius);
-    }//åœˆå‡ºå·¡é€»èŒƒå›´
+        Gizmos.DrawWireSphere(transform.position, patrolRange);
+    }
+
+    //Animation Event
+    protected virtual bool Hit()
+    {
+        if (attackTarget != null)
+            // && transform.CatchedTarget(attackTarget.transform)) //ÕâÀïÃ»ÓĞÊ¹ÓÃ½Ì³ÌÀïµÄÀ©Õ¹·½·¨
+        {
+            var targetStats = attackTarget.GetComponent<CharacterStats>();
+
+            Vector3 direction = attackTarget.transform.position - transform.position;
+            //³¬³öAttack·¶Î§¶ªÊ§
+            if (direction.magnitude > characterStats.AttackRange)
+            {
+                //Debug.Log("miss");
+                return false;
+            }
+
+            direction.Normalize();
+            //ÅĞ¶¨Íæ¼Ò×Ô¶¯ÉÁ±Ü
+            if (Vector3.Dot(transform.forward, direction) < characterStats.attackData.enemyAtkCosin)
+            {
+                //Debug.Log("Dodge£¡£¡");
+                NavMeshAgent targetAgent = attackTarget.GetComponent<NavMeshAgent>();
+                Vector3 dodgeDir = -transform.forward + attackTarget.transform.forward * 2;
+                if(targetAgent.isOnNavMesh) targetAgent.isStopped = true;
+                //ÉÁ±ÜÉæË®µÄË¥¼õ
+                float waterSlow = Mathf.Lerp(1f, 0.5f, AudioManager.Instance.footStepWaterDeep - transform.position.y);
+                targetAgent.velocity = dodgeDir.normalized * targetStats.characterData.attackDodgeVel * waterSlow;
+                //ÒôĞ§
+                attackTarget.GetComponent<PlayerController>().PlayDodgeSound(true);
+
+                return false;
+            }
+            targetStats.TakeDamage(characterStats, targetStats);
+
+            //»÷ÖĞÍæ¼ÒÒôĞ§
+            HitPlayerSound(targetStats);
+
+            return true;
+        }
+
+        return false;
+    }
+
+    public void HitPlayerSound(CharacterStats targetStats, float bias  =0)
+    {
+        SoundName soundName = characterStats.isCritical ? SoundName.Enemy_CritBody : SoundName.Enemy_AttackBody;
+        if (targetStats.attackData.hasEquipShield && targetStats.isShieldSuccess)
+        {
+            soundName = targetStats.attackData.isMetalShield ?
+                (characterStats.isCritical ? SoundName.Enemy_CritMetalShield : SoundName.Enemy_MetalShield)
+               : (characterStats.isCritical ? SoundName.Enemy_CritWoodShield : SoundName.Enemy_WoodShield);
+        }
+        AudioManager.Instance.Play3DSoundEffect(soundName, soundDetailList, targetStats.transform, bias, bias);
+    }
+
+    public void EndNotify()
+    {
+        //»ñÊ¤¶¯»­
+        //Í£Ö¹ËùÓĞÒÆ¶¯
+        //Í£Ö¹Agent
+        if (Vector3.Distance(transform.position, GameManager.Instance.player.transform.position) 
+            < patrolRange + sightRadius)
+            animator.SetBool("Win", true);
+
+        playerDead = true;
+        isChase = false;
+        isWalk = false;
+        attackTarget = null;
+    }
+
+    public void LoadNotify()
+    {
+        //¹Ø±Õ»ñÊ¤¶¯»­
+        animator.SetBool("Win", false);
+
+        //ÖØÖÃ¶ÔÍæ¼Ò×´Ì¬
+        playerDead = false;
+        attackTarget = null;
+
+        //ÖØÖÃÑ²Âß×´Ì¬
+        if (isGuard)
+            enemyBehaviorState = EnemyBehaviorState.GUARD;
+        else
+            enemyBehaviorState = EnemyBehaviorState.PATROL;
+    }
+
+    public virtual Vector3 GetEyeForward(GameObject eyeBall)
+    {
+        return eyeBall.transform.up * -1f;
+    }
+
+
+    //ÎÚ¹êËÀÍö×¨ÓÃ
+    public void ResetTurtleDestroy()
+    {
+        StopCoroutine("TurtleLaterDestroy");
+        if (gameObject.activeSelf)
+            StartCoroutine("TurtleLaterDestroy");
+    }
+    //ÎÚ¹êËÀÍö×¨ÓÃ
+    IEnumerator TurtleLaterDestroy()
+    {
+        yield return new WaitForSeconds(Random.Range(TurtleDestroyWaitTime, TurtleDestroyWaitTime * 2));
+
+        coll.enabled = false;
+
+        if (!isDestroying)
+        {
+            Destroy(gameObject, 2f);
+            //ËÀÍöºóÖØĞÂÉú³É
+            GameManager.Instance.InstantiateEnemy(gameObject, gameObject.transform.position, numInArray);
+
+            isDestroying = true;
+        }
+    }
+
+    //ÆğÌøÏà¹ØµÄ¶¯»­£¬ÆğÌøÊ±ÉèÖÃagent°ë¾¶Îª0
+    //event
+    void SetAgentZeroRadiusWhenJump()
+    {
+        agent.radius = 0;
+    }
+    //ÆğÌøÏà¹ØµÄ¶¯»­£¬ÂäµØÊ±»Ö¸´agent°ë¾¶
+    //event
+    void ResetAgentRadiusWhenLanding()
+    {
+        agent.radius = agentRadius;
+    }
+
+    #region Play Sound
+    /// <summary>
+    /// Animation Event£ºÍæ¼Ò½Å²½Éù
+    /// </summary>
+    void FootStepSound()
+    {
+        if (isDead) return; //ĞŞ¸´ËÀºó½Å²½ÉùµÄbug
+
+        float scaleBias = 0.1f / transform.localScale.x;
+        if (enemyBehaviorState == EnemyBehaviorState.CHASE)
+            AudioManager.Instance.Play3DSoundEffect(SoundName.Enemy_Run, soundDetailList, transform, scaleBias, -scaleBias);
+        else
+            AudioManager.Instance.Play3DSoundEffect(SoundName.Enemy_Walk, soundDetailList, transform, scaleBias, -scaleBias);
+    }
+    public void SlimeGrassFastSound(float volumeBiasRate)
+    {
+        float scaleBias = 0.1f / transform.localScale.x;
+        AudioManager.Instance.Play3DSoundEffect(SoundName.Enemy_Walk, soundDetailList, transform,
+            0.4f + scaleBias, volumeBiasRate - scaleBias);
+    }
+    void SlimeCriticalStepSound()
+    {
+        float scaleBias = 0.1f / transform.localScale.x;
+        AudioManager.Instance.Play3DSoundEffect(SoundName.Enemy_Run, soundDetailList, transform,
+            -0.4f + scaleBias, 0.2f - scaleBias);
+    }
+    //Animation Event
+    void SlimeTauntStepSound(float volumeBiasRate)
+    {
+        float scaleBias = 0.1f / transform.localScale.x;
+        AudioManager.Instance.Play3DSoundEffect(SoundName.Enemy_Run, soundDetailList, transform,
+            0.2f + scaleBias, -0.1f - scaleBias + volumeBiasRate);
+    }
+    void SlimeVictoryStepSound()
+    {
+        float scaleBias = 0.1f / transform.localScale.x;
+        AudioManager.Instance.Play3DSoundEffect(SoundName.Enemy_Run, soundDetailList, transform,
+            -0.2f + scaleBias, 0.1f - scaleBias);
+    }
+
+    //Animation Event
+    public void AttackDodgeSound()
+    {
+        float scaleBias = 0.1f / transform.localScale.x;
+        AudioManager.Instance.Play3DSoundEffect(SoundName.EnemyAttackDodge, soundDetailList, transform,
+            scaleBias, - scaleBias);
+    }
+
+    //¹ÖÎï²¥·ÅÊÜ»÷ÒôĞ§
+    internal void PlayHitSound(SoundName enemyHitSound, float pitchAdd = 0, float volumeAdd = 0)
+    {
+        float scaleBias = 0.1f / transform.localScale.x;
+        float pitchBias = scaleBias + pitchAdd;
+        //ÊÇ·ñÎª¼ıÊ¸
+        if (enemyHitSound != SoundName.Enemy_by_Arrow)
+            pitchBias -= GameManager.Instance.playerStats.WeaponPitchBias;
+
+        //ÌØÊâ¶¯×÷Çé¿ö
+        switch (GameManager.Instance.player.GetComponent<PlayerController>().
+            weaponWaveSound)
+        {
+            case SoundName.TwoHandSword_Rush:
+            case SoundName.TwoHandAxe_Rush:
+            case SoundName.TwoHandMace_HitBack:
+                pitchBias -= 0.25f;
+                break;
+        }
+
+        //¹ÖÎïÊÜ»÷µÄÒôµ÷£¬ÓëÎäÆ÷µÄÒôµ÷Æ«ÒÆÏà·´
+        AudioManager.Instance.Play3DSoundEffect(enemyHitSound, soundDetailList, transform,
+            pitchBias, -scaleBias + volumeAdd);
+    }
+
+    void AttackWaveSound()
+    {
+        float scaleBias = 0.1f / transform.localScale.x;
+        SoundName soundName = characterStats.isCritical ? SoundName.Enemy_CritWave : SoundName.Enemy_AttackWave;
+        AudioManager.Instance.Play3DSoundEffect(soundName, soundDetailList, transform, scaleBias, -scaleBias);
+    }
+
+    void CheckNoisePlay(bool forcePlay = false, int noiseID = 0)
+    {
+        if (isDead) return;
+
+        if ((forcePlay || lastNoiseTime < 0) && currentNoiseTime < 0)
+        {
+            Sound sound = null;
+            if (noiseID == 0)
+                sound = AudioManager.Instance.Play3DSoundEffect(noises[Random.Range(0, noises.Length)],
+                    soundDetailList, transform, noisePitchBias);
+            else
+                sound = AudioManager.Instance.Play3DSoundEffect(noises[noiseID-1],
+                    soundDetailList, transform, noisePitchBias);
+
+            lastNoiseTime = NextNoiseTime;
+            currentNoiseTime = sound.audioSource.clip.length * 1.5f;
+        }
+
+        lastNoiseTime -= Time.deltaTime;
+        currentNoiseTime -= Time.deltaTime;
+    }
+
+    /// <summary>
+    /// Animation Event
+    /// ¹ÖÎï²»Í¬¶¯»­£¬ÓĞ¼¸ÂÊ´¥·¢
+    /// float: ½ĞÉù´¥·¢µÄ¼¸ÂÊ
+    /// int: Ö¸¶¨½ĞÉù´¥·¢µÄ±àºÅ£¬1~3£»0±íÊ¾Ëæ»ú´¥·¢
+    /// </summary>
+    /// <param name="animationEvent"></param>
+    public void PlayNoise(AnimationEvent animationEvent)
+    {
+        if (Random.value < animationEvent.floatParameter)
+            CheckNoisePlay(true, animationEvent.intParameter);
+    }
+    public void RandomPlayNoise(float rate)
+    {
+        if (Random.value < rate) 
+            StartCoroutine(LaterPlayNoise());
+    }
+
+    IEnumerator LaterPlayNoise()
+    {
+        yield return new WaitForSeconds(Random.value);
+        CheckNoisePlay(true);
+    }
+    #endregion
 }
